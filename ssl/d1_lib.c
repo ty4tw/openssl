@@ -855,10 +855,13 @@ int DTLSv1_listen(SSL *s, BIO_ADDR *client)
     BIO_ADDR_free(tmpclient);
     return ret;
 }
-#endif
 
-#ifndef OPENSSL_NO_SOCK
-int DTLSv1_listen_ex(SSL *s, BIO_ADDR *client)
+/*=======================================================================
+ *
+ *     Add new function for multiplexing IO
+ *
+ *======================================================================*/
+int DTLSv1_listen_mplx(SSL *s, BIO_ADDR *client)
 {
     int next, n, ret = 0;
     unsigned char cookie[DTLS1_COOKIE_LENGTH];
@@ -1271,114 +1274,8 @@ int DTLSv1_listen_ex(SSL *s, BIO_ADDR *client)
     BIO_ADDR_free(tmpclient);
     return ret;
 }
+/*=======================================================================*/
 #endif
-static int dtls1_handshake_write(SSL *s)
-{
-    return dtls1_do_write(s, SSL3_RT_HANDSHAKE);
-}
-
-int dtls1_shutdown(SSL *s)
-{
-    int ret;
-#ifndef OPENSSL_NO_SCTP
-    BIO *wbio;
-
-    wbio = SSL_get_wbio(s);
-    if (wbio != NULL && BIO_dgram_is_sctp(wbio) &&
-        !(s->shutdown & SSL_SENT_SHUTDOWN)) {
-        ret = BIO_dgram_sctp_wait_for_dry(wbio);
-        if (ret < 0)
-            return -1;
-
-        if (ret == 0)
-            BIO_ctrl(SSL_get_wbio(s), BIO_CTRL_DGRAM_SCTP_SAVE_SHUTDOWN, 1,
-                     NULL);
-    }
-#endif
-    ret = ssl3_shutdown(s);
-#ifndef OPENSSL_NO_SCTP
-    BIO_ctrl(SSL_get_wbio(s), BIO_CTRL_DGRAM_SCTP_SAVE_SHUTDOWN, 0, NULL);
-#endif
-    return ret;
-}
-
-int dtls1_query_mtu(SSL *s)
-{
-    if (s->d1->link_mtu) {
-        s->d1->mtu =
-            s->d1->link_mtu - BIO_dgram_get_mtu_overhead(SSL_get_wbio(s));
-        s->d1->link_mtu = 0;
-    }
-
-    /* AHA!  Figure out the MTU, and stick to the right size */
-    if (s->d1->mtu < dtls1_min_mtu(s)) {
-        if (!(SSL_get_options(s) & SSL_OP_NO_QUERY_MTU)) {
-            s->d1->mtu =
-                BIO_ctrl(SSL_get_wbio(s), BIO_CTRL_DGRAM_QUERY_MTU, 0, NULL);
-
-            /*
-             * I've seen the kernel return bogus numbers when it doesn't know
-             * (initial write), so just make sure we have a reasonable number
-             */
-            if (s->d1->mtu < dtls1_min_mtu(s)) {
-                /* Set to min mtu */
-                s->d1->mtu = dtls1_min_mtu(s);
-                BIO_ctrl(SSL_get_wbio(s), BIO_CTRL_DGRAM_SET_MTU,
-                         (long)s->d1->mtu, NULL);
-            }
-        } else
-            return 0;
-    }
-    return 1;
-}
-
-static size_t dtls1_link_min_mtu(void)
-{
-    return (g_probable_mtu[(sizeof(g_probable_mtu) /
-                            sizeof(g_probable_mtu[0])) - 1]);
-}
-
-size_t dtls1_min_mtu(SSL *s)
-{
-    return dtls1_link_min_mtu() - BIO_dgram_get_mtu_overhead(SSL_get_wbio(s));
-}
-
-size_t DTLS_get_data_mtu(const SSL *s)
-{
-    size_t mac_overhead, int_overhead, blocksize, ext_overhead;
-    const SSL_CIPHER *ciph = SSL_get_current_cipher(s);
-    size_t mtu = s->d1->mtu;
-
-    if (ciph == NULL)
-        return 0;
-
-    if (!ssl_cipher_get_overhead(ciph, &mac_overhead, &int_overhead,
-                                 &blocksize, &ext_overhead))
-        return 0;
-
-    if (SSL_READ_ETM(s))
-        ext_overhead += mac_overhead;
-    else
-        int_overhead += mac_overhead;
-
-    /* Subtract external overhead (e.g. IV/nonce, separate MAC) */
-    if (ext_overhead + DTLS1_RT_HEADER_LENGTH >= mtu)
-        return 0;
-    mtu -= ext_overhead + DTLS1_RT_HEADER_LENGTH;
-
-    /* Round encrypted payload down to cipher block size (for CBC etc.)
-     * No check for overflow since 'mtu % blocksize' cannot exceed mtu. */
-    if (blocksize)
-        mtu -= (mtu % blocksize);
-
-    /* Subtract internal overhead (e.g. CBC padding len byte) */
-    if (int_overhead >= mtu)
-        return 0;
-    mtu -= int_overhead;
-
-    return mtu;
-}
-
 
 static int dtls1_handshake_write(SSL *s)
 {
